@@ -1,0 +1,165 @@
+#version 450
+
+/**
+ * 2D Convolution Compute Shader
+ * 
+ * Performs 2D convolution: output = input * kernel + bias
+ * Supports:
+ * - Arbitrary kernel sizes
+ * - Configurable stride and padding
+ * - Multiple input/output channels
+ * - Batch processing
+ */
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Input feature map: [batch, height, width, in_channels]
+layout(std430, binding = 0) readonly buffer InputBuffer {
+    float input_data[];
+};
+
+// Convolution kernel: [out_channels, kernel_h, kernel_w, in_channels] 
+layout(std430, binding = 1) readonly buffer KernelBuffer {
+    float kernel_data[];
+};
+
+// Bias: [out_channels] (optional, can be zero)
+layout(std430, binding = 2) readonly buffer BiasBuffer {
+    float bias_data[];
+};
+
+// Output feature map: [batch, out_height, out_width, out_channels]
+layout(std430, binding = 3) writeonly buffer OutputBuffer {
+    float output_data[];
+};
+
+// Convolution parameters
+layout(push_constant) uniform PushConstants {
+    // Input dimensions
+    uint batch_size;
+    uint input_height;
+    uint input_width;
+    uint input_channels;
+    
+    // Kernel dimensions
+    uint kernel_height;
+    uint kernel_width;
+    uint output_channels;
+    
+    // Output dimensions
+    uint output_height;
+    uint output_width;
+    
+    // Convolution parameters
+    uint stride_x;
+    uint stride_y;
+    uint pad_left;
+    uint pad_top;
+    
+    // Flags
+    uint has_bias;
+} params;
+
+// Shared memory for input tile (includes padding for kernel)
+shared float input_tile[16][16];  // 8x8 output + 7x7 max kernel overlap
+
+uint getInputIndex(uint batch, uint y, uint x, uint channel) {
+    return batch * (params.input_height * params.input_width * params.input_channels) +
+           y * (params.input_width * params.input_channels) +
+           x * params.input_channels +
+           channel;
+}
+
+uint getKernelIndex(uint out_ch, uint ky, uint kx, uint in_ch) {
+    return out_ch * (params.kernel_height * params.kernel_width * params.input_channels) +
+           ky * (params.kernel_width * params.input_channels) +
+           kx * params.input_channels +
+           in_ch;
+}
+
+uint getOutputIndex(uint batch, uint y, uint x, uint channel) {
+    return batch * (params.output_height * params.output_width * params.output_channels) +
+           y * (params.output_width * params.output_channels) +
+           x * params.output_channels +
+           channel;
+}
+
+void main() {
+    // Output coordinates
+    uint batch = gl_GlobalInvocationID.z;
+    uint out_y = gl_GlobalInvocationID.y;
+    uint out_x = gl_GlobalInvocationID.x;
+    
+    // Check bounds
+    if (batch >= params.batch_size || 
+        out_y >= params.output_height || 
+        out_x >= params.output_width) {
+        return;
+    }
+    
+    // Process all output channels for this spatial location
+    for (uint out_ch = 0; out_ch < params.output_channels; out_ch++) {
+        float sum = 0.0;
+        
+        // Convolution over kernel and input channels
+        for (uint ky = 0; ky < params.kernel_height; ky++) {
+            for (uint kx = 0; kx < params.kernel_width; kx++) {
+                for (uint in_ch = 0; in_ch < params.input_channels; in_ch++) {
+                    // Calculate input coordinates
+                    int input_y = int(out_y * params.stride_y + ky) - int(params.pad_top);
+                    int input_x = int(out_x * params.stride_x + kx) - int(params.pad_left);
+                    
+                    // Check if input coordinates are valid (padding)
+                    if (input_y >= 0 && input_y < int(params.input_height) &&
+                        input_x >= 0 && input_x < int(params.input_width)) {
+                        
+                        uint input_idx = getInputIndex(batch, uint(input_y), uint(input_x), in_ch);
+                        uint kernel_idx = getKernelIndex(out_ch, ky, kx, in_ch);
+                        
+                        sum += input_data[input_idx] * kernel_data[kernel_idx];
+                    }
+                    // If outside bounds, implicitly multiply by 0 (zero padding)
+                }
+            }
+        }
+        
+        // Add bias if present
+        if (params.has_bias > 0) {
+            sum += bias_data[out_ch];
+        }
+        
+        // Write output
+        uint output_idx = getOutputIndex(batch, out_y, out_x, out_ch);
+        output_data[output_idx] = sum;
+    }
+}
+
+/*
+Performance Optimizations:
+
+1. Work Group Size: 8x8 = 64 threads, good for occupancy
+2. Channel Processing: Each thread processes all output channels for locality
+3. Memory Layout: NHWC format for better cache utilization
+4. Bounds Checking: Minimal branching for valid coordinates
+
+Memory Requirements:
+- Input: batch * H * W * C_in * 4 bytes
+- Kernel: C_out * K_h * K_w * C_in * 4 bytes  
+- Output: batch * H_out * W_out * C_out * 4 bytes
+
+Theoretical Performance:
+- Operations per output element: K_h * K_w * C_in * 2 (MAC operations)
+- Total FLOPs: batch * H_out * W_out * C_out * K_h * K_w * C_in * 2
+
+Usage from C++:
+  // Set push constants with convolution parameters
+  params.batch_size = batch;
+  params.input_height = input_h;
+  // ... set all parameters
+  
+  // Dispatch work groups
+  uint groups_x = (output_width + 7) / 8;
+  uint groups_y = (output_height + 7) / 8; 
+  uint groups_z = batch_size;
+  dispatch(groups_x, groups_y, groups_z);
+*/

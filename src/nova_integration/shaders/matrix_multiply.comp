@@ -1,0 +1,110 @@
+#version 450
+
+/**
+ * Matrix Multiplication Compute Shader
+ * 
+ * Performs C = A * B where:
+ * - A is M x K matrix
+ * - B is K x N matrix  
+ * - C is M x N matrix (output)
+ * 
+ * Uses shared memory and work group optimization for performance
+ */
+
+// Work group size - optimized for most GPUs
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Buffer bindings
+layout(std430, binding = 0) readonly buffer MatrixA {
+    float A[];
+};
+
+layout(std430, binding = 1) readonly buffer MatrixB {
+    float B[];
+};
+
+layout(std430, binding = 2) writeonly buffer MatrixC {
+    float C[];
+};
+
+// Matrix dimensions as push constants
+layout(push_constant) uniform PushConstants {
+    uint M;  // Rows of A and C
+    uint N;  // Columns of B and C
+    uint K;  // Columns of A, rows of B
+} dims;
+
+// Shared memory for tiling
+shared float tile_A[16][16];
+shared float tile_B[16][16];
+
+void main() {
+    // Global thread coordinates
+    uint row = gl_GlobalInvocationID.y;
+    uint col = gl_GlobalInvocationID.x;
+    
+    // Local thread coordinates within work group
+    uint local_row = gl_LocalInvocationID.y;
+    uint local_col = gl_LocalInvocationID.x;
+    
+    float sum = 0.0;
+    
+    // Number of tiles needed to cover the K dimension
+    uint num_tiles = (dims.K + 15) / 16;
+    
+    for (uint tile = 0; tile < num_tiles; tile++) {
+        // Load tile of matrix A into shared memory
+        uint a_row = row;
+        uint a_col = tile * 16 + local_col;
+        if (a_row < dims.M && a_col < dims.K) {
+            tile_A[local_row][local_col] = A[a_row * dims.K + a_col];
+        } else {
+            tile_A[local_row][local_col] = 0.0;
+        }
+        
+        // Load tile of matrix B into shared memory
+        uint b_row = tile * 16 + local_row;
+        uint b_col = col;
+        if (b_row < dims.K && b_col < dims.N) {
+            tile_B[local_row][local_col] = B[b_row * dims.N + b_col];
+        } else {
+            tile_B[local_row][local_col] = 0.0;
+        }
+        
+        // Synchronize to ensure all threads have loaded their data
+        barrier();
+        
+        // Compute partial dot product for this tile
+        for (uint k = 0; k < 16; k++) {
+            sum += tile_A[local_row][k] * tile_B[k][local_col];
+        }
+        
+        // Synchronize before loading next tile
+        barrier();
+    }
+    
+    // Write result to output matrix
+    if (row < dims.M && col < dims.N) {
+        C[row * dims.N + col] = sum;
+    }
+}
+
+/*
+Performance Notes:
+
+1. Work Group Size: 16x16 = 256 threads per group is optimal for most GPUs
+2. Shared Memory: Each work group uses 2KB of shared memory (2 * 16 * 16 * 4 bytes)
+3. Memory Coalescing: Accesses to global memory are coalesced for efficiency
+4. Tiling: Reduces global memory accesses by reusing data in shared memory
+
+Theoretical Performance:
+- For 1024x1024 matrix multiplication: ~2.1 GFLOP (1024^3 * 2 operations)
+- On RTX 3080 (~30 TFLOPs): Expected ~70 microseconds
+- Memory bandwidth: ~3.2 GB for 1024x1024 float matrices
+
+Usage from C++:
+  dims.M = matrix_a_rows;
+  dims.N = matrix_b_cols; 
+  dims.K = matrix_a_cols;
+  dispatch((dims.N + 15) / 16, (dims.M + 15) / 16, 1);
+*/
