@@ -59,7 +59,7 @@ CARL/
 ### Setup
 ```bash
 # Clone with submodules
-git clone --recursive <repository-url>
+git clone --recursive https://github.com/TheAgencyInstitute/CARL.git
 
 # Initialize Nova submodule if not cloned recursively  
 git submodule update --init --recursive
@@ -103,4 +103,4 @@ This project is open-source for non-commercial use. Commercial exploitation requ
 
 ## Contributing
 
-[Contributing guidelines to be added]
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and contribution guidelines.
