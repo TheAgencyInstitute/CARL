@@ -1,0 +1,65 @@
+# Build artifacts
+*.obj
+*.pdb
+*.tlog
+*.idb
+*.log
+*.tmp
+*.ilk
+*.exe
+*.dll
+*.so
+*.dylib
+
+# IDE files
+.vs/
+.vscode/
+*.suo
+*.user
+*.sdf
+*.opensdf
+
+# Debug directories
+x64/Debug/
+x64/Release/
+Debug/
+Release/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Temporary files
+*~
+.#*
+\#*#
+
+# Cache directories
+scanner_cache/
+.shamash/
+
+# Nova submodule (tracked separately)
+# nova/ (commented out - we want to track submodule reference)
+
+# Language specific
+*.a
+*.lib
+*.pyc
+__pycache__/
+*.egg-info/
+node_modules/
+target/
+
+# Documentation builds
+docs/_build/
+*.pdf
+!docs/*.pdf
+
+# Test outputs  
+test_results/
+coverage/
+*.gcov
+*.gcda
+*.gcno
