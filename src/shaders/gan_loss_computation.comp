@@ -1,0 +1,120 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : enable
+
+// GAN Loss Computation Shader for CARL AI System
+// Computes adversarial losses on GPU for efficient training
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer RealOutputs {
+    float real_discriminator_outputs[];
+};
+
+layout(set = 0, binding = 1, std430) restrict readonly buffer FakeOutputs {
+    float fake_discriminator_outputs[];
+};
+
+layout(set = 0, binding = 2, std430) restrict writeonly buffer DiscriminatorLoss {
+    float d_loss[];
+};
+
+layout(set = 0, binding = 3, std430) restrict writeonly buffer GeneratorLoss {
+    float g_loss[];
+};
+
+layout(set = 0, binding = 4, std430) restrict buffer LossStatistics {
+    float total_d_loss;
+    float total_g_loss;
+    float avg_real_score;
+    float avg_fake_score;
+    uint batch_size;
+    uint padding1;
+    uint padding2;
+    uint padding3;
+};
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint loss_type; // 0=BCE, 1=WGAN, 2=LSGAN
+    float label_smoothing;
+    float gradient_penalty_weight;
+    uint reduction_type; // 0=mean, 1=sum
+    uint pad1;
+    uint pad2;
+    uint pad3;
+} pc;
+
+// Loss function implementations
+float binary_cross_entropy(float prediction, float target, float smoothing) {
+    // Apply label smoothing
+    float smooth_target = target * (1.0 - smoothing) + 0.5 * smoothing;
+    
+    // Clamp to prevent log(0)
+    float clamped_pred = clamp(prediction, 1e-7, 1.0 - 1e-7);
+    
+    return -(smooth_target * log(clamped_pred) + (1.0 - smooth_target) * log(1.0 - clamped_pred));
+}
+
+float wasserstein_loss(float prediction, float target) {
+    // WGAN loss: E[D(real)] - E[D(fake)]
+    return target * prediction; // target is 1 for real, -1 for fake
+}
+
+float least_squares_loss(float prediction, float target) {
+    // LSGAN loss: 0.5 * (prediction - target)^2
+    float diff = prediction - target;
+    return 0.5 * diff * diff;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    
+    if (idx >= pc.batch_size) {
+        return;
+    }
+    
+    float real_output = real_discriminator_outputs[idx];
+    float fake_output = fake_discriminator_outputs[idx];
+    
+    float d_loss_real, d_loss_fake, g_loss_val;
+    
+    // Compute losses based on selected loss type
+    switch (pc.loss_type) {
+        case 0: // Binary Cross-Entropy (Standard GAN)
+            d_loss_real = binary_cross_entropy(real_output, 1.0, pc.label_smoothing);
+            d_loss_fake = binary_cross_entropy(fake_output, 0.0, pc.label_smoothing);
+            g_loss_val = binary_cross_entropy(fake_output, 1.0, 0.0);
+            break;
+            
+        case 1: // Wasserstein GAN
+            d_loss_real = wasserstein_loss(real_output, 1.0);
+            d_loss_fake = wasserstein_loss(fake_output, -1.0);
+            g_loss_val = wasserstein_loss(fake_output, 1.0);
+            break;
+            
+        case 2: // Least Squares GAN
+            d_loss_real = least_squares_loss(real_output, 1.0);
+            d_loss_fake = least_squares_loss(fake_output, 0.0);
+            g_loss_val = least_squares_loss(fake_output, 1.0);
+            break;
+            
+        default:
+            d_loss_real = binary_cross_entropy(real_output, 1.0, pc.label_smoothing);
+            d_loss_fake = binary_cross_entropy(fake_output, 0.0, pc.label_smoothing);
+            g_loss_val = binary_cross_entropy(fake_output, 1.0, 0.0);
+            break;
+    }
+    
+    // Compute total discriminator loss
+    float d_total = d_loss_real + d_loss_fake;
+    
+    // Store individual losses
+    d_loss[idx] = d_total;
+    g_loss[idx] = g_loss_val;
+    
+    // Atomic accumulation for statistics
+    atomicAdd(total_d_loss, d_total);
+    atomicAdd(total_g_loss, g_loss_val);
+    atomicAdd(avg_real_score, real_output);
+    atomicAdd(avg_fake_score, fake_output);
+}

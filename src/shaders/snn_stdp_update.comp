@@ -1,0 +1,87 @@
+#version 450
+
+// STDP (Spike-Timing Dependent Plasticity) weight update shader
+// Implements Hebbian learning for spiking neural networks
+// "Neurons that fire together, wire together"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, std430) restrict buffer SynapticWeights {
+    float synaptic_weights[];
+};
+
+layout(set = 0, binding = 1, std430) restrict readonly buffer PreSpikeTimesBuffer {
+    float pre_spike_times[];
+};
+
+layout(set = 0, binding = 2, std430) restrict readonly buffer PostSpikeTimesBuffer {
+    float post_spike_times[];
+};
+
+layout(set = 0, binding = 3, std430) restrict buffer WeightChangeBuffer {
+    float weight_changes[];
+};
+
+layout(push_constant) uniform PushConstants {
+    float learning_rate;
+    float tau_plus;      // LTP time constant (typically 20ms)
+    float tau_minus;     // LTD time constant (typically 20ms) 
+    float A_plus;        // LTP amplitude
+    float A_minus;       // LTD amplitude
+    uint neuron_count;
+    float dt;            // Current timestep
+    float weight_min;    // Minimum weight value (0.0)
+    float weight_max;    // Maximum weight value (1.0)
+} pc;
+
+void main() {
+    uint pre_neuron = gl_GlobalInvocationID.x;
+    uint post_neuron = gl_GlobalInvocationID.y;
+    
+    if (pre_neuron >= pc.neuron_count || post_neuron >= pc.neuron_count) {
+        return;
+    }
+    
+    // No self-connections
+    if (pre_neuron == post_neuron) {
+        return;
+    }
+    
+    uint synapse_idx = pre_neuron * pc.neuron_count + post_neuron;
+    
+    float pre_time = pre_spike_times[pre_neuron];
+    float post_time = post_spike_times[post_neuron];
+    
+    // Skip if either neuron hasn't spiked
+    if (pre_time < 0.0 || post_time < 0.0) {
+        weight_changes[synapse_idx] = 0.0;
+        return;
+    }
+    
+    float dt_spike = post_time - pre_time;
+    float weight_change = 0.0;
+    
+    if (dt_spike > 0.0) {
+        // Post-synaptic spike after pre-synaptic -> LTP (potentiation)
+        // Strengthen the connection
+        weight_change = pc.A_plus * exp(-dt_spike / pc.tau_plus);
+    } else if (dt_spike < 0.0) {
+        // Pre-synaptic spike after post-synaptic -> LTD (depression)
+        // Weaken the connection
+        weight_change = -pc.A_minus * exp(dt_spike / pc.tau_minus);
+    }
+    
+    // Apply learning rate
+    weight_change *= pc.learning_rate;
+    
+    // Update synaptic weight with bounds checking
+    float current_weight = synaptic_weights[synapse_idx];
+    float new_weight = current_weight + weight_change;
+    
+    // Clamp weight to valid range
+    new_weight = clamp(new_weight, pc.weight_min, pc.weight_max);
+    
+    // Store updated weight and change for monitoring
+    synaptic_weights[synapse_idx] = new_weight;
+    weight_changes[synapse_idx] = weight_change;
+}

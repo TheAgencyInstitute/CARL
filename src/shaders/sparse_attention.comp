@@ -1,0 +1,97 @@
+#version 450
+
+// Sparse attention compute shader for CARL AI system
+// Optimized attention mechanism for large models with sparse binding
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer QueryBuffer {
+    float queries[];
+};
+
+layout(set = 0, binding = 1, std430) restrict readonly buffer KeyBuffer {
+    float keys[];
+};
+
+layout(set = 0, binding = 2, std430) restrict readonly buffer ValueBuffer {
+    float values[];
+};
+
+layout(set = 0, binding = 3, std430) restrict writeonly buffer OutputBuffer {
+    float output_data[];
+};
+
+layout(set = 0, binding = 4, std430) restrict readonly buffer AttentionMask {
+    float attention_mask[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint sequence_length;
+    uint hidden_dim;
+    uint head_dim;
+    uint batch_size;
+    float scale_factor;
+    uint sparse_pattern_size;
+    uint pad1;
+    uint pad2;
+} pc;
+
+// Sparse attention pattern - only attend to specific positions
+bool should_attend(uint query_pos, uint key_pos) {
+    // Local attention: attend to nearby positions
+    uint local_window = pc.sparse_pattern_size;
+    if (abs(int(query_pos) - int(key_pos)) <= int(local_window)) {
+        return true;
+    }
+    
+    // Global attention: attend to specific global positions
+    if (key_pos % (pc.sequence_length / 8) == 0) {
+        return true;
+    }
+    
+    return false;
+}
+
+void main() {
+    uint query_idx = gl_GlobalInvocationID.y;
+    uint head_idx = gl_GlobalInvocationID.x;
+    
+    if (query_idx >= pc.sequence_length || head_idx >= pc.head_dim) {
+        return;
+    }
+    
+    float sum = 0.0;
+    float attention_sum = 0.0;
+    
+    // Compute sparse attention
+    for (uint key_idx = 0; key_idx < pc.sequence_length; key_idx++) {
+        if (!should_attend(query_idx, key_idx)) {
+            continue;
+        }
+        
+        // Compute attention score: Q * K^T
+        float score = 0.0;
+        for (uint dim = 0; dim < pc.head_dim; dim++) {
+            uint q_offset = query_idx * pc.head_dim + dim;
+            uint k_offset = key_idx * pc.head_dim + dim;
+            score += queries[q_offset] * keys[k_offset];
+        }
+        
+        // Scale and apply mask
+        score *= pc.scale_factor;
+        uint mask_idx = query_idx * pc.sequence_length + key_idx;
+        score += attention_mask[mask_idx];
+        
+        // Softmax will be computed in separate pass
+        float attention_weight = exp(score);
+        attention_sum += attention_weight;
+        
+        // Weighted sum of values
+        uint v_offset = key_idx * pc.head_dim + head_idx;
+        sum += attention_weight * values[v_offset];
+    }
+    
+    // Normalize by attention sum
+    uint output_idx = query_idx * pc.head_dim + head_idx;
+    output_data[output_idx] = (attention_sum > 0.0) ? (sum / attention_sum) : 0.0;
+}

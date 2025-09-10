@@ -1,0 +1,86 @@
+#version 450
+
+// GAN Generator compute shader for CARL AI system
+// Transforms noise into synthetic data
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer NoiseInput {
+    float noise[];
+};
+
+layout(set = 0, binding = 1, std430) restrict readonly buffer GeneratorWeights {
+    float weights[];
+};
+
+layout(set = 0, binding = 2, std430) restrict readonly buffer GeneratorBias {
+    float bias[];
+};
+
+layout(set = 0, binding = 3, std430) restrict writeonly buffer GeneratedOutput {
+    float generated_data[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint noise_dim;
+    uint output_width;
+    uint output_height;
+    uint output_channels;
+    uint layer_index;
+    uint activation_type; // 0=ReLU, 1=Tanh, 2=Sigmoid
+    uint pad1;
+    uint pad2;
+} pc;
+
+// Activation functions
+float apply_activation(float x, uint type) {
+    switch (type) {
+        case 0: // ReLU
+            return max(0.0, x);
+        case 1: // Tanh
+            return tanh(x);
+        case 2: // Sigmoid
+            return 1.0 / (1.0 + exp(-x));
+        default:
+            return x;
+    }
+}
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    
+    if (x >= pc.output_width || y >= pc.output_height) {
+        return;
+    }
+    
+    for (uint c = 0; c < pc.output_channels; c++) {
+        float sum = 0.0;
+        
+        // Process noise through generator layers
+        if (pc.layer_index == 0) {
+            // First layer: direct noise transformation
+            for (uint i = 0; i < pc.noise_dim; i++) {
+                uint weight_idx = (c * pc.output_height + y) * pc.output_width * pc.noise_dim + 
+                                 x * pc.noise_dim + i;
+                sum += noise[i] * weights[weight_idx];
+            }
+        } else {
+            // Subsequent layers: spatial convolution-like operations
+            // This is a simplified version - real implementation would use proper convolution
+            uint input_idx = (c * pc.output_height + y) * pc.output_width + x;
+            sum = noise[input_idx % pc.noise_dim]; // Placeholder for layer processing
+        }
+        
+        // Add bias
+        uint bias_idx = c;
+        sum += bias[bias_idx];
+        
+        // Apply activation
+        float activated = apply_activation(sum, pc.activation_type);
+        
+        // Store output
+        uint output_idx = (c * pc.output_height + y) * pc.output_width + x;
+        generated_data[output_idx] = activated;
+    }
+}

@@ -1,0 +1,39 @@
+#version 450
+
+// ReLU activation function compute shader for CARL AI system
+// Optimized for parallel activation processing
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer InputBuffer {
+    float input_data[];
+};
+
+layout(set = 0, binding = 1, std430) restrict writeonly buffer OutputBuffer {
+    float output_data[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint element_count;
+    float leak_factor; // For Leaky ReLU variant
+    uint pad1;
+    uint pad2;
+} pc;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    
+    if (index >= pc.element_count) {
+        return;
+    }
+    
+    float value = input_data[index];
+    
+    // Standard ReLU: max(0, x)
+    // Leaky ReLU: max(leak_factor * x, x)
+    if (pc.leak_factor > 0.0) {
+        output_data[index] = max(pc.leak_factor * value, value);
+    } else {
+        output_data[index] = max(0.0, value);
+    }
+}

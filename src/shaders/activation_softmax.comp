@@ -1,0 +1,47 @@
+#version 450
+
+// Softmax activation function compute shader for CARL AI system
+// Used in neural network output layers and attention mechanisms
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer InputBuffer {
+    float input_data[];
+};
+
+layout(set = 0, binding = 1, std430) restrict writeonly buffer OutputBuffer {
+    float output_data[];
+};
+
+layout(set = 0, binding = 2, std430) restrict readonly buffer SharedMaxBuffer {
+    float shared_max[];
+};
+
+layout(set = 0, binding = 3, std430) restrict readonly buffer SharedSumBuffer {
+    float shared_sum[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint feature_size;
+    uint total_elements;
+    uint pad;
+} pc;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    
+    if (index >= pc.total_elements) {
+        return;
+    }
+    
+    uint batch_idx = index / pc.feature_size;
+    uint feature_idx = index % pc.feature_size;
+    
+    // Numerically stable softmax: exp(x - max) / sum(exp(x - max))
+    float max_val = shared_max[batch_idx];
+    float sum_val = shared_sum[batch_idx];
+    
+    float exp_val = exp(input_data[index] - max_val);
+    output_data[index] = exp_val / sum_val;
+}

@@ -1,0 +1,113 @@
+#version 450
+
+// GAN Discriminator compute shader for CARL AI system
+// Distinguishes between real and generated data
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer InputData {
+    float input_data[];
+};
+
+layout(set = 0, binding = 1, std430) restrict readonly buffer DiscriminatorWeights {
+    float weights[];
+};
+
+layout(set = 0, binding = 2, std430) restrict readonly buffer DiscriminatorBias {
+    float bias[];
+};
+
+layout(set = 0, binding = 3, std430) restrict writeonly buffer ClassificationOutput {
+    float output_data[];
+};
+
+layout(set = 0, binding = 4, std430) restrict buffer FeatureExtraction {
+    float features[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint input_width;
+    uint input_height;
+    uint input_channels;
+    uint feature_dim;
+    uint batch_size;
+    uint layer_index;
+    uint activation_type; // 0=ReLU, 1=LeakyReLU, 2=Sigmoid
+    float leak_factor;
+} pc;
+
+// Discriminator activation functions
+float apply_discriminator_activation(float x, uint type, float leak) {
+    switch (type) {
+        case 0: // ReLU
+            return max(0.0, x);
+        case 1: // Leaky ReLU (common in discriminators)
+            return (x > 0.0) ? x : (leak * x);
+        case 2: // Sigmoid (for final classification)
+            return 1.0 / (1.0 + exp(-x));
+        default:
+            return x;
+    }
+}
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    
+    if (x >= pc.input_width || y >= pc.input_height) {
+        return;
+    }
+    
+    uint pixel_idx = y * pc.input_width + x;
+    
+    if (pc.layer_index == 0) {
+        // First layer: feature extraction from input image
+        for (uint f = 0; f < pc.feature_dim && f < 64; f++) {
+            float sum = 0.0;
+            
+            // Simple feature extraction (in practice, this would be convolution)
+            for (uint c = 0; c < pc.input_channels; c++) {
+                uint input_idx = (c * pc.input_height + y) * pc.input_width + x;
+                uint weight_idx = f * pc.input_channels + c;
+                
+                if (input_idx < pc.input_width * pc.input_height * pc.input_channels) {
+                    sum += input_data[input_idx] * weights[weight_idx % 1024]; // Bounded access
+                }
+            }
+            
+            // Add bias and activate
+            sum += bias[f % 64];
+            float activated = apply_discriminator_activation(sum, pc.activation_type, pc.leak_factor);
+            
+            uint feature_idx = pixel_idx * pc.feature_dim + f;
+            if (feature_idx < pc.input_width * pc.input_height * pc.feature_dim) {
+                features[feature_idx] = activated;
+            }
+        }
+    } else {
+        // Final layer: classification output
+        float classification_score = 0.0;
+        
+        // Aggregate features for classification
+        for (uint f = 0; f < pc.feature_dim; f++) {
+            uint feature_idx = pixel_idx * pc.feature_dim + f;
+            if (feature_idx < pc.input_width * pc.input_height * pc.feature_dim) {
+                float feature_val = features[feature_idx];
+                uint weight_idx = f;
+                
+                classification_score += feature_val * weights[weight_idx % 1024];
+            }
+        }
+        
+        // Add final bias
+        classification_score += bias[0];
+        
+        // Apply sigmoid for probability output
+        float probability = apply_discriminator_activation(classification_score, 2, 0.0);
+        
+        // Store classification output
+        if (pixel_idx < pc.input_width * pc.input_height) {
+            output_data[pixel_idx] = probability;
+        }
+    }
+}

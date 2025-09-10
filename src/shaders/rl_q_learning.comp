@@ -1,0 +1,89 @@
+#version 450
+
+// Q-Learning compute shader for CARL AI system
+// Implements Deep Q-Network (DQN) value updates
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) restrict buffer QValues {
+    float q_values[];
+};
+
+layout(set = 0, binding = 1, std430) restrict readonly buffer States {
+    float states[];
+};
+
+layout(set = 0, binding = 2, std430) restrict readonly buffer Actions {
+    uint actions[];
+};
+
+layout(set = 0, binding = 3, std430) restrict readonly buffer Rewards {
+    float rewards[];
+};
+
+layout(set = 0, binding = 4, std430) restrict readonly buffer NextStates {
+    float next_states[];
+};
+
+layout(set = 0, binding = 5, std430) restrict readonly buffer DoneFlags {
+    uint done[];
+};
+
+layout(set = 0, binding = 6, std430) restrict writeonly buffer TargetValues {
+    float targets[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint state_dim;
+    uint action_dim;
+    float gamma;          // Discount factor
+    float learning_rate;
+    uint update_type;     // 0=DQN, 1=Double-DQN, 2=Dueling-DQN
+    uint pad1;
+    uint pad2;
+} pc;
+
+void main() {
+    uint batch_idx = gl_GlobalInvocationID.x;
+    
+    if (batch_idx >= pc.batch_size) {
+        return;
+    }
+    
+    uint action = actions[batch_idx];
+    float reward = rewards[batch_idx];
+    bool is_done = (done[batch_idx] != 0);
+    
+    // Current Q-value for taken action
+    uint q_idx = batch_idx * pc.action_dim + action;
+    float current_q = q_values[q_idx];
+    
+    float target_q;
+    
+    if (is_done) {
+        // Terminal state: target is just the reward
+        target_q = reward;
+    } else {
+        // Find maximum Q-value for next state
+        float max_next_q = -3.402823466e+38; // -FLT_MAX
+        
+        uint next_state_offset = batch_idx * pc.action_dim;
+        for (uint a = 0; a < pc.action_dim; a++) {
+            uint next_q_idx = next_state_offset + a;
+            if (next_q_idx < pc.batch_size * pc.action_dim) {
+                max_next_q = max(max_next_q, q_values[next_q_idx]);
+            }
+        }
+        
+        // Q-learning update: R + γ * max(Q(s', a'))
+        target_q = reward + pc.gamma * max_next_q;
+    }
+    
+    // Store target value for loss computation
+    targets[batch_idx] = target_q;
+    
+    // Update Q-value using temporal difference error
+    float td_error = target_q - current_q;
+    q_values[q_idx] = current_q + pc.learning_rate * td_error;
+}

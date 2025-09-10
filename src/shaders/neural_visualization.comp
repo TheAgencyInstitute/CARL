@@ -1,0 +1,121 @@
+#version 450
+
+// Neural network visualization compute shader for CARL AI system
+// Renders neural network weights and activations for hybrid graphics-compute operations
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer NeuralWeights {
+    float weights[];
+};
+
+layout(set = 0, binding = 1, std430) restrict readonly buffer Activations {
+    float activations[];
+};
+
+layout(set = 0, binding = 2, rgba8) restrict writeonly uniform image2D OutputTexture;
+
+layout(push_constant) uniform PushConstants {
+    uint weight_width;
+    uint weight_height;
+    uint layer_index;
+    float weight_scale;
+    float activation_scale;
+    uint visualization_mode; // 0=weights, 1=activations, 2=combined
+    uint color_scheme;       // 0=grayscale, 1=heatmap, 2=custom
+    float time_factor;       // For animated visualizations
+} pc;
+
+// Color mapping functions
+vec3 apply_heatmap(float value) {
+    // Red-Yellow-Green-Cyan-Blue heatmap
+    value = clamp(value, 0.0, 1.0);
+    
+    if (value < 0.25) {
+        return mix(vec3(0.0, 0.0, 1.0), vec3(0.0, 1.0, 1.0), value * 4.0);
+    } else if (value < 0.5) {
+        return mix(vec3(0.0, 1.0, 1.0), vec3(0.0, 1.0, 0.0), (value - 0.25) * 4.0);
+    } else if (value < 0.75) {
+        return mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 1.0, 0.0), (value - 0.5) * 4.0);
+    } else {
+        return mix(vec3(1.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), (value - 0.75) * 4.0);
+    }
+}
+
+vec3 apply_custom_colormap(float value, float time) {
+    // Animated custom colormap
+    float hue = value + time * 0.1;
+    float sat = 0.8;
+    float val = 0.9;
+    
+    // Simple HSV to RGB conversion
+    float c = val * sat;
+    float x = c * (1.0 - abs(mod(hue * 6.0, 2.0) - 1.0));
+    float m = val - c;
+    
+    if (hue < 1.0/6.0) return vec3(c, x, 0.0) + m;
+    else if (hue < 2.0/6.0) return vec3(x, c, 0.0) + m;
+    else if (hue < 3.0/6.0) return vec3(0.0, c, x) + m;
+    else if (hue < 4.0/6.0) return vec3(0.0, x, c) + m;
+    else if (hue < 5.0/6.0) return vec3(x, 0.0, c) + m;
+    else return vec3(c, 0.0, x) + m;
+}
+
+void main() {
+    ivec2 pixel_coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 image_size = imageSize(OutputTexture);
+    
+    if (pixel_coord.x >= image_size.x || pixel_coord.y >= image_size.y) {
+        return;
+    }
+    
+    // Map pixel coordinates to weight/activation indices
+    uint weight_x = uint(pixel_coord.x * pc.weight_width / image_size.x);
+    uint weight_y = uint(pixel_coord.y * pc.weight_height / image_size.y);
+    uint weight_idx = weight_y * pc.weight_width + weight_x;
+    
+    float value = 0.0;
+    
+    if (pc.visualization_mode == 0) {
+        // Visualize weights
+        if (weight_idx < pc.weight_width * pc.weight_height) {
+            value = weights[weight_idx] * pc.weight_scale;
+        }
+    } else if (pc.visualization_mode == 1) {
+        // Visualize activations
+        if (weight_idx < pc.weight_width * pc.weight_height) {
+            value = activations[weight_idx] * pc.activation_scale;
+        }
+    } else {
+        // Combined visualization
+        float weight_val = 0.0;
+        float activation_val = 0.0;
+        
+        if (weight_idx < pc.weight_width * pc.weight_height) {
+            weight_val = weights[weight_idx] * pc.weight_scale;
+            activation_val = activations[weight_idx] * pc.activation_scale;
+        }
+        
+        value = (weight_val + activation_val) * 0.5;
+    }
+    
+    // Normalize value to [0, 1]
+    value = (value + 1.0) * 0.5;
+    value = clamp(value, 0.0, 1.0);
+    
+    // Apply color scheme
+    vec3 color;
+    if (pc.color_scheme == 0) {
+        // Grayscale
+        color = vec3(value);
+    } else if (pc.color_scheme == 1) {
+        // Heatmap
+        color = apply_heatmap(value);
+    } else {
+        // Custom animated colormap
+        color = apply_custom_colormap(value, pc.time_factor);
+    }
+    
+    // Write to output texture
+    imageStore(OutputTexture, pixel_coord, vec4(color, 1.0));
+}

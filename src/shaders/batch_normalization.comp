@@ -1,0 +1,53 @@
+#version 450
+
+// Batch normalization compute shader for CARL AI system
+// Critical for stable GAN and deep CNN training
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer InputBuffer {
+    float input_data[];
+};
+
+layout(set = 0, binding = 1, std430) restrict writeonly buffer OutputBuffer {
+    float output_data[];
+};
+
+layout(set = 0, binding = 2, std430) restrict readonly buffer MeanBuffer {
+    float mean[];
+};
+
+layout(set = 0, binding = 3, std430) restrict readonly buffer VarianceBuffer {
+    float variance[];
+};
+
+layout(set = 0, binding = 4, std430) restrict readonly buffer GammaBuffer {
+    float gamma[];
+};
+
+layout(set = 0, binding = 5, std430) restrict readonly buffer BetaBuffer {
+    float beta[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint features;
+    uint total_elements;
+    float epsilon;
+} pc;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    
+    if (index >= pc.total_elements) {
+        return;
+    }
+    
+    uint feature_idx = (index / pc.batch_size) % pc.features;
+    
+    // Batch normalization: (x - mean) / sqrt(var + epsilon) * gamma + beta
+    float normalized = (input_data[index] - mean[feature_idx]) / 
+                      sqrt(variance[feature_idx] + pc.epsilon);
+    
+    output_data[index] = normalized * gamma[feature_idx] + beta[feature_idx];
+}

@@ -1,0 +1,137 @@
+#version 450
+
+// GAN Progressive Training Shader for CARL AI System
+// Supports progressive growing from low to high resolution
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer LowResInput {
+    float low_res_data[];
+};
+
+layout(set = 0, binding = 1, std430) restrict readonly buffer HighResInput {
+    float high_res_data[];
+};
+
+layout(set = 0, binding = 2, std430) restrict writeonly buffer BlendedOutput {
+    float blended_data[];
+};
+
+layout(set = 0, binding = 3, std430) restrict readonly buffer InterpolationWeights {
+    float interpolation_weights[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint low_res_width;
+    uint low_res_height;
+    uint high_res_width;
+    uint high_res_height;
+    uint channels;
+    float blend_factor; // 0.0 = full low res, 1.0 = full high res
+    uint upsampling_mode; // 0=nearest, 1=bilinear, 2=bicubic
+    uint current_stage; // Progressive training stage
+} pc;
+
+// Bilinear interpolation for upsampling
+float bilinear_sample(uint channel, float x, float y, uint src_width, uint src_height) {
+    float fx = floor(x);
+    float fy = floor(y);
+    uint x0 = uint(fx);
+    uint y0 = uint(fy);
+    uint x1 = min(x0 + 1, src_width - 1);
+    uint y1 = min(y0 + 1, src_height - 1);
+    
+    float dx = x - fx;
+    float dy = y - fy;
+    
+    uint idx00 = (channel * src_height + y0) * src_width + x0;
+    uint idx01 = (channel * src_height + y0) * src_width + x1;
+    uint idx10 = (channel * src_height + y1) * src_width + x0;
+    uint idx11 = (channel * src_height + y1) * src_width + x1;
+    
+    float val00 = low_res_data[idx00];
+    float val01 = low_res_data[idx01];
+    float val10 = low_res_data[idx10];
+    float val11 = low_res_data[idx11];
+    
+    float val0 = mix(val00, val01, dx);
+    float val1 = mix(val10, val11, dx);
+    
+    return mix(val0, val1, dy);
+}
+
+// Nearest neighbor upsampling
+float nearest_sample(uint channel, float x, float y, uint src_width, uint src_height) {
+    uint nx = uint(round(x));
+    uint ny = uint(round(y));
+    nx = min(nx, src_width - 1);
+    ny = min(ny, src_height - 1);
+    
+    uint idx = (channel * src_height + ny) * src_width + nx;
+    return low_res_data[idx];
+}
+
+// Fade-in blending for progressive training
+float progressive_blend(float low_res_val, float high_res_val, float blend_factor) {
+    // Smooth transition from low to high resolution
+    float smoothed_blend = blend_factor * blend_factor * (3.0 - 2.0 * blend_factor);
+    return mix(low_res_val, high_res_val, smoothed_blend);
+}
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    
+    if (x >= pc.high_res_width || y >= pc.high_res_height) {
+        return;
+    }
+    
+    for (uint c = 0; c < pc.channels; c++) {
+        float final_value;
+        
+        // Calculate corresponding position in low resolution
+        float low_x = float(x) * float(pc.low_res_width) / float(pc.high_res_width);
+        float low_y = float(y) * float(pc.low_res_height) / float(pc.high_res_height);
+        
+        // Sample from low resolution data
+        float upsampled_low_res;
+        switch (pc.upsampling_mode) {
+            case 0: // Nearest neighbor
+                upsampled_low_res = nearest_sample(c, low_x, low_y, pc.low_res_width, pc.low_res_height);
+                break;
+            case 1: // Bilinear
+                upsampled_low_res = bilinear_sample(c, low_x, low_y, pc.low_res_width, pc.low_res_height);
+                break;
+            default:
+                upsampled_low_res = nearest_sample(c, low_x, low_y, pc.low_res_width, pc.low_res_height);
+                break;
+        }
+        
+        // Get high resolution value if available
+        uint high_res_idx = (c * pc.high_res_height + y) * pc.high_res_width + x;
+        float high_res_val = (pc.blend_factor > 0.0) ? high_res_data[high_res_idx] : 0.0;
+        
+        // Progressive blending based on training stage
+        if (pc.current_stage == 0) {
+            // Stage 0: Only low resolution
+            final_value = upsampled_low_res;
+        } else if (pc.current_stage == 1) {
+            // Stage 1: Fade in high resolution details
+            final_value = progressive_blend(upsampled_low_res, high_res_val, pc.blend_factor);
+        } else {
+            // Stage 2+: Full high resolution
+            final_value = high_res_val;
+        }
+        
+        // Apply any additional processing based on interpolation weights
+        uint weight_idx = (c * pc.high_res_height + y) * pc.high_res_width + x;
+        if (weight_idx < pc.high_res_width * pc.high_res_height * pc.channels) {
+            float weight = interpolation_weights[weight_idx];
+            final_value *= weight;
+        }
+        
+        // Store result
+        uint output_idx = (c * pc.high_res_height + y) * pc.high_res_width + x;
+        blended_data[output_idx] = final_value;
+    }
+}

@@ -1,0 +1,72 @@
+#version 450
+
+// Gradient descent optimization compute shader for CARL AI system
+// Used for training neural network weights
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) restrict buffer WeightsBuffer {
+    float weights[];
+};
+
+layout(set = 0, binding = 1, std430) restrict readonly buffer GradientsBuffer {
+    float gradients[];
+};
+
+layout(set = 0, binding = 2, std430) restrict buffer MomentumBuffer {
+    float momentum[];
+};
+
+layout(set = 0, binding = 3, std430) restrict buffer VelocityBuffer {
+    float velocity[];
+};
+
+layout(push_constant) uniform PushConstants {
+    float learning_rate;
+    float momentum_coefficient;
+    float weight_decay;
+    uint total_weights;
+    uint optimizer_type; // 0=SGD, 1=Momentum, 2=Adam
+    float beta1; // Adam beta1
+    float beta2; // Adam beta2
+    float epsilon; // Adam epsilon
+} pc;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    
+    if (index >= pc.total_weights) {
+        return;
+    }
+    
+    float gradient = gradients[index];
+    float current_weight = weights[index];
+    
+    // Apply weight decay (L2 regularization)
+    if (pc.weight_decay > 0.0) {
+        gradient += pc.weight_decay * current_weight;
+    }
+    
+    if (pc.optimizer_type == 0) {
+        // Standard SGD
+        weights[index] = current_weight - pc.learning_rate * gradient;
+        
+    } else if (pc.optimizer_type == 1) {
+        // SGD with Momentum
+        float new_momentum = pc.momentum_coefficient * momentum[index] + gradient;
+        momentum[index] = new_momentum;
+        weights[index] = current_weight - pc.learning_rate * new_momentum;
+        
+    } else if (pc.optimizer_type == 2) {
+        // Adam optimizer
+        float m = pc.beta1 * momentum[index] + (1.0 - pc.beta1) * gradient;
+        float v = pc.beta2 * velocity[index] + (1.0 - pc.beta2) * gradient * gradient;
+        
+        momentum[index] = m;
+        velocity[index] = v;
+        
+        // Bias correction terms would be applied outside this shader
+        float weight_update = pc.learning_rate * m / (sqrt(v) + pc.epsilon);
+        weights[index] = current_weight - weight_update;
+    }
+}

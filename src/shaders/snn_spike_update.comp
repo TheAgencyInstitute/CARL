@@ -1,0 +1,81 @@
+#version 450
+
+// Spiking Neural Network spike update compute shader for CARL AI system
+// Implements Leaky Integrate-and-Fire (LIF) neuron model
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) restrict buffer MembranePotentials {
+    float membrane_v[];
+};
+
+layout(set = 0, binding = 1, std430) restrict readonly buffer InputCurrents {
+    float input_current[];
+};
+
+layout(set = 0, binding = 2, std430) restrict buffer SpikeTimes {
+    float spike_times[];
+};
+
+layout(set = 0, binding = 3, std430) restrict writeonly buffer OutputSpikes {
+    uint output_spikes[];
+};
+
+layout(set = 0, binding = 4, std430) restrict buffer RefractoryCounters {
+    float refractory_timers[];
+};
+
+layout(push_constant) uniform PushConstants {
+    float dt;                    // Time step
+    float membrane_resistance;   // Membrane resistance
+    float membrane_capacitance;  // Membrane capacitance  
+    float threshold_voltage;     // Spike threshold
+    float reset_voltage;         // Post-spike reset voltage
+    float refractory_period;     // Refractory period
+    uint neuron_count;
+    float current_time;
+} pc;
+
+void main() {
+    uint neuron_idx = gl_GlobalInvocationID.x;
+    
+    if (neuron_idx >= pc.neuron_count) {
+        return;
+    }
+    
+    float v = membrane_v[neuron_idx];
+    float i_input = input_current[neuron_idx];
+    float refractory_timer = refractory_timers[neuron_idx];
+    
+    // Check if neuron is in refractory period
+    if (refractory_timer > 0.0) {
+        refractory_timers[neuron_idx] = max(0.0, refractory_timer - pc.dt);
+        output_spikes[neuron_idx] = 0;
+        return;
+    }
+    
+    // Leaky Integrate-and-Fire dynamics
+    // dV/dt = (-V + R*I) / (R*C)
+    float tau = pc.membrane_resistance * pc.membrane_capacitance;
+    float dv_dt = (-v + pc.membrane_resistance * i_input) / tau;
+    
+    // Update membrane potential
+    v += dv_dt * pc.dt;
+    
+    // Check for spike
+    if (v >= pc.threshold_voltage) {
+        // Generate spike
+        output_spikes[neuron_idx] = 1;
+        spike_times[neuron_idx] = pc.current_time;
+        
+        // Reset membrane potential
+        v = pc.reset_voltage;
+        
+        // Start refractory period
+        refractory_timers[neuron_idx] = pc.refractory_period;
+    } else {
+        output_spikes[neuron_idx] = 0;
+    }
+    
+    membrane_v[neuron_idx] = v;
+}

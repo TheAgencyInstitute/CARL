@@ -1,0 +1,54 @@
+#version 450
+
+// Max pooling compute shader for CARL AI system
+// Used in CNN architectures for downsampling
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer InputImage {
+    float input_data[];
+};
+
+layout(set = 0, binding = 1, std430) restrict writeonly buffer OutputImage {
+    float output_data[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint input_width;
+    uint input_height;
+    uint pool_size;
+    uint stride;
+    uint output_width;
+    uint output_height;
+    uint channels;
+    uint pad;
+} pc;
+
+void main() {
+    uint out_x = gl_GlobalInvocationID.x;
+    uint out_y = gl_GlobalInvocationID.y;
+    
+    if (out_x >= pc.output_width || out_y >= pc.output_height) {
+        return;
+    }
+    
+    for (uint c = 0; c < pc.channels; c++) {
+        float max_val = -3.402823466e+38; // -FLT_MAX
+        
+        // Find maximum in pool window
+        for (uint py = 0; py < pc.pool_size; py++) {
+            for (uint px = 0; px < pc.pool_size; px++) {
+                uint in_x = out_x * pc.stride + px;
+                uint in_y = out_y * pc.stride + py;
+                
+                if (in_x < pc.input_width && in_y < pc.input_height) {
+                    uint input_idx = (c * pc.input_height + in_y) * pc.input_width + in_x;
+                    max_val = max(max_val, input_data[input_idx]);
+                }
+            }
+        }
+        
+        uint output_idx = (c * pc.output_height + out_y) * pc.output_width + out_x;
+        output_data[output_idx] = max_val;
+    }
+}

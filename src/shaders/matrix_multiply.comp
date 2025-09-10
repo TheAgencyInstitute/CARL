@@ -1,0 +1,45 @@
+#version 450
+
+// Matrix multiplication compute shader for CARL AI system
+// Optimized for Nova-CARL multi-queue architecture
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer MatrixA {
+    float matrix_a[];
+};
+
+layout(set = 0, binding = 1, std430) restrict readonly buffer MatrixB {
+    float matrix_b[];
+};
+
+layout(set = 0, binding = 2, std430) restrict writeonly buffer MatrixResult {
+    float result[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint rows_a;
+    uint cols_a;
+    uint cols_b;
+    uint pad;
+} pc;
+
+void main() {
+    uint row = gl_GlobalInvocationID.y;
+    uint col = gl_GlobalInvocationID.x;
+    
+    if (row >= pc.rows_a || col >= pc.cols_b) {
+        return;
+    }
+    
+    float sum = 0.0;
+    
+    // Compute dot product for result[row][col]
+    for (uint k = 0; k < pc.cols_a; k++) {
+        float a_val = matrix_a[row * pc.cols_a + k];
+        float b_val = matrix_b[k * pc.cols_b + col];
+        sum += a_val * b_val;
+    }
+    
+    result[row * pc.cols_b + col] = sum;
+}

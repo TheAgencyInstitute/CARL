@@ -1,0 +1,107 @@
+#version 450
+
+// Policy Gradient compute shader for CARL AI system
+// Implements REINFORCE and Actor-Critic algorithms
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) restrict buffer PolicyWeights {
+    float policy_weights[];
+};
+
+layout(set = 0, binding = 1, std430) restrict readonly buffer States {
+    float states[];
+};
+
+layout(set = 0, binding = 2, std430) restrict readonly buffer Actions {
+    uint actions[];
+};
+
+layout(set = 0, binding = 3, std430) restrict readonly buffer Rewards {
+    float rewards[];
+};
+
+layout(set = 0, binding = 4, std430) restrict readonly buffer ActionProbs {
+    float action_probs[];
+};
+
+layout(set = 0, binding = 5, std430) restrict readonly buffer ValueEstimates {
+    float values[];
+};
+
+layout(set = 0, binding = 6, std430) restrict writeonly buffer PolicyGradients {
+    float gradients[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint state_dim;
+    uint action_dim;
+    uint weight_count;
+    float learning_rate;
+    float entropy_coefficient;
+    uint algorithm_type; // 0=REINFORCE, 1=Actor-Critic, 2=A3C
+    float gamma;         // Discount factor
+} pc;
+
+// Compute discounted returns
+float compute_return(uint start_idx, uint episode_length) {
+    float return_val = 0.0;
+    float discount = 1.0;
+    
+    for (uint i = 0; i < episode_length; i++) {
+        uint reward_idx = start_idx + i;
+        if (reward_idx < pc.batch_size) {
+            return_val += discount * rewards[reward_idx];
+            discount *= pc.gamma;
+        }
+    }
+    
+    return return_val;
+}
+
+void main() {
+    uint batch_idx = gl_GlobalInvocationID.x;
+    
+    if (batch_idx >= pc.batch_size) {
+        return;
+    }
+    
+    uint action = actions[batch_idx];
+    float reward = rewards[batch_idx];
+    float action_prob = action_probs[batch_idx * pc.action_dim + action];
+    
+    // Prevent log(0) by clamping probability
+    action_prob = max(action_prob, 1e-8);
+    
+    float advantage = reward;
+    
+    if (pc.algorithm_type == 1 || pc.algorithm_type == 2) {
+        // Actor-Critic: advantage = reward - value_estimate
+        float value_estimate = values[batch_idx];
+        advantage = reward - value_estimate;
+    } else {
+        // REINFORCE: advantage = discounted return
+        advantage = compute_return(batch_idx, 1); // Simplified for single step
+    }
+    
+    // Policy gradient: ∇log(π(a|s)) * A(s,a)
+    float log_prob = log(action_prob);
+    float policy_gradient = log_prob * advantage;
+    
+    // Add entropy bonus to encourage exploration
+    float entropy = -action_prob * log_prob;
+    policy_gradient += pc.entropy_coefficient * entropy;
+    
+    // Update policy weights (simplified - real implementation would backpropagate)
+    for (uint w = 0; w < min(pc.weight_count, 1024u); w++) {
+        uint weight_idx = (batch_idx % 8) * 128 + w; // Simplified weight indexing
+        if (weight_idx < pc.weight_count) {
+            float gradient = policy_gradient * states[batch_idx * pc.state_dim + (w % pc.state_dim)];
+            gradients[weight_idx] = gradient;
+            
+            // Apply gradient update
+            policy_weights[weight_idx] += pc.learning_rate * gradient;
+        }
+    }
+}

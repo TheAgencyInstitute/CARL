@@ -1,0 +1,192 @@
+#version 450
+
+// Sparse memory management compute shader for CARL AI system
+// Manages virtual memory allocation for ultra-large models using sparse binding
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) restrict buffer VirtualMemoryMap {
+    uint memory_map[];
+};
+
+layout(set = 0, binding = 1, std430) restrict buffer PhysicalMemoryPool {
+    uint physical_pool[];
+};
+
+layout(set = 0, binding = 2, std430) restrict buffer AllocationRequests {
+    uint allocation_requests[];
+};
+
+layout(set = 0, binding = 3, std430) restrict buffer DeallocationRequests {
+    uint deallocation_requests[];
+};
+
+layout(set = 0, binding = 4, std430) restrict writeonly buffer AllocationResults {
+    uint allocation_results[];
+};
+
+layout(set = 0, binding = 5, std430) restrict buffer MemoryUsageStats {
+    uint usage_stats[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint virtual_memory_size;    // Total virtual memory size in pages
+    uint physical_memory_size;   // Available physical memory in pages
+    uint page_size;              // Size of each memory page
+    uint allocation_count;       // Number of allocation requests
+    uint deallocation_count;     // Number of deallocation requests
+    uint memory_policy;          // 0=First-fit, 1=Best-fit, 2=LRU
+    uint pad1;
+    uint pad2;
+} pc;
+
+// Memory page states
+const uint PAGE_FREE = 0;
+const uint PAGE_ALLOCATED = 1;
+const uint PAGE_SWAPPED = 2;
+const uint PAGE_RESERVED = 3;
+
+uint find_free_pages(uint required_pages, uint policy) {
+    if (policy == 0) {
+        // First-fit allocation
+        uint consecutive_free = 0;
+        uint start_page = 0;
+        
+        for (uint i = 0; i < pc.physical_memory_size; i++) {
+            if (physical_pool[i] == PAGE_FREE) {
+                if (consecutive_free == 0) {
+                    start_page = i;
+                }
+                consecutive_free++;
+                
+                if (consecutive_free >= required_pages) {
+                    return start_page;
+                }
+            } else {
+                consecutive_free = 0;
+            }
+        }
+    } else if (policy == 1) {
+        // Best-fit allocation
+        uint best_start = 0xFFFFFFFF;
+        uint best_size = 0xFFFFFFFF;
+        uint current_start = 0;
+        uint current_size = 0;
+        
+        for (uint i = 0; i < pc.physical_memory_size; i++) {
+            if (physical_pool[i] == PAGE_FREE) {
+                if (current_size == 0) {
+                    current_start = i;
+                }
+                current_size++;
+            } else {
+                if (current_size >= required_pages && current_size < best_size) {
+                    best_start = current_start;
+                    best_size = current_size;
+                }
+                current_size = 0;
+            }
+        }
+        
+        if (best_start != 0xFFFFFFFF) {
+            return best_start;
+        }
+    }
+    
+    return 0xFFFFFFFF; // No suitable block found
+}
+
+void main() {
+    uint thread_id = gl_GlobalInvocationID.x;
+    
+    // Handle allocation requests
+    if (thread_id < pc.allocation_count) {
+        uint request = allocation_requests[thread_id];
+        uint virtual_page = request & 0xFFFF;
+        uint pages_needed = (request >> 16) & 0xFFFF;
+        
+        if (virtual_page < pc.virtual_memory_size && pages_needed > 0) {
+            uint physical_start = find_free_pages(pages_needed, pc.memory_policy);
+            
+            if (physical_start != 0xFFFFFFFF) {
+                // Allocate physical pages
+                for (uint i = 0; i < pages_needed; i++) {
+                    uint phys_page = physical_start + i;
+                    if (phys_page < pc.physical_memory_size) {
+                        physical_pool[phys_page] = PAGE_ALLOCATED;
+                        
+                        // Map virtual to physical
+                        uint virt_page = virtual_page + i;
+                        if (virt_page < pc.virtual_memory_size) {
+                            memory_map[virt_page] = phys_page | 0x80000000; // Mark as mapped
+                        }
+                    }
+                }
+                
+                allocation_results[thread_id] = physical_start;
+                
+                // Update usage statistics
+                atomicAdd(usage_stats[0], pages_needed); // Total allocated pages
+                atomicAdd(usage_stats[1], 1);            // Total allocations
+            } else {
+                allocation_results[thread_id] = 0xFFFFFFFF; // Allocation failed
+                atomicAdd(usage_stats[2], 1); // Failed allocations
+            }
+        }
+    }
+    
+    // Handle deallocation requests
+    uint dealloc_thread = thread_id - pc.allocation_count;
+    if (dealloc_thread < pc.deallocation_count && thread_id >= pc.allocation_count) {
+        uint virtual_page = deallocation_requests[dealloc_thread];
+        
+        if (virtual_page < pc.virtual_memory_size) {
+            uint mapping = memory_map[virtual_page];
+            
+            if ((mapping & 0x80000000) != 0) { // Check if mapped
+                uint physical_page = mapping & 0x7FFFFFFF;
+                
+                if (physical_page < pc.physical_memory_size) {
+                    // Free physical page
+                    physical_pool[physical_page] = PAGE_FREE;
+                    
+                    // Clear virtual mapping
+                    memory_map[virtual_page] = 0;
+                    
+                    // Update usage statistics
+                    atomicAdd(usage_stats[0], -1); // Decrease allocated pages
+                    atomicAdd(usage_stats[3], 1);  // Total deallocations
+                }
+            }
+        }
+    }
+    
+    // Memory compaction and defragmentation
+    if (thread_id == 0) {
+        // Update fragmentation statistics
+        uint free_blocks = 0;
+        uint largest_free_block = 0;
+        uint current_free_block = 0;
+        
+        for (uint i = 0; i < pc.physical_memory_size; i++) {
+            if (physical_pool[i] == PAGE_FREE) {
+                current_free_block++;
+            } else {
+                if (current_free_block > 0) {
+                    free_blocks++;
+                    largest_free_block = max(largest_free_block, current_free_block);
+                    current_free_block = 0;
+                }
+            }
+        }
+        
+        usage_stats[4] = free_blocks;        // Number of free blocks
+        usage_stats[5] = largest_free_block; // Largest contiguous free block
+        
+        // Calculate fragmentation ratio
+        uint total_free = pc.physical_memory_size - usage_stats[0];
+        if (total_free > 0) {
+            usage_stats[6] = (free_blocks * 100) / total_free; // Fragmentation percentage
+        }
+    }
+}

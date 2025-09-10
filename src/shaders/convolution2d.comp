@@ -1,0 +1,62 @@
+#version 450
+
+// 2D Convolution compute shader for CARL AI system
+// Optimized for CNN forward passes
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer InputImage {
+    float input_data[];
+};
+
+layout(set = 0, binding = 1, std430) restrict readonly buffer ConvKernel {
+    float kernel_data[];
+};
+
+layout(set = 0, binding = 2, std430) restrict writeonly buffer OutputImage {
+    float output_data[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint input_width;
+    uint input_height;
+    uint kernel_size;
+    uint stride;
+    uint padding;
+    uint output_width;
+    uint output_height;
+    uint pad;
+} pc;
+
+void main() {
+    uint out_x = gl_GlobalInvocationID.x;
+    uint out_y = gl_GlobalInvocationID.y;
+    
+    if (out_x >= pc.output_width || out_y >= pc.output_height) {
+        return;
+    }
+    
+    float sum = 0.0;
+    
+    // Apply convolution filter
+    for (uint ky = 0; ky < pc.kernel_size; ky++) {
+        for (uint kx = 0; kx < pc.kernel_size; kx++) {
+            // Calculate input coordinates
+            int in_x = int(out_x * pc.stride + kx) - int(pc.padding);
+            int in_y = int(out_y * pc.stride + ky) - int(pc.padding);
+            
+            // Check bounds
+            if (in_x >= 0 && in_x < int(pc.input_width) && 
+                in_y >= 0 && in_y < int(pc.input_height)) {
+                
+                uint input_idx = uint(in_y) * pc.input_width + uint(in_x);
+                uint kernel_idx = ky * pc.kernel_size + kx;
+                
+                sum += input_data[input_idx] * kernel_data[kernel_idx];
+            }
+        }
+    }
+    
+    uint output_idx = out_y * pc.output_width + out_x;
+    output_data[output_idx] = sum;
+}
